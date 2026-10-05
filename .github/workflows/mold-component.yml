@@ -6,6 +6,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: mold-component-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -37,8 +40,11 @@ jobs:
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          TAG="mold-test-${SOURCE_SHA:0:12}"
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then echo "Immutable candidate Release already exists" >&2; exit 1; fi
           IMAGE="ghcr.io/${REPOSITORY}:sha-${SOURCE_SHA}"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u dhslove --password-stdin
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then echo "Immutable candidate image already exists" >&2; exit 1; fi
           docker build -f Dockerfile.mold --label org.opencontainers.image.revision="$SOURCE_SHA" --label org.opencontainers.image.source="https://github.com/$REPOSITORY" --label io.ablestack.api-signature=HMAC-SHA256 -t "$IMAGE" .
           docker push "$IMAGE"
           docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE" > bin/image-digest.txt
