@@ -15,19 +15,31 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM --platform=$BUILDPLATFORM golang:1.23 AS builder
-ARG BUILDPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
+# This file is sourced, not executed.
+# shellcheck shell=bash
 
-WORKDIR /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-COPY go.mod /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.mod
-COPY go.sum /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.sum
-RUN go mod download
+log() {
+    echo "[$(date -u +%H:%M:%S)] $*" >&2
+}
 
-COPY . /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-RUN make clean && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} make
+die() {
+    log "FATAL: $*"
+    exit 1
+}
 
-FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/cloudstack-ccm /app/cloudstack-ccm
-ENTRYPOINT [ "/app/cloudstack-ccm", "--cloud-provider", "external-cloudstack" ]
+# wait_for <timeout-seconds> <interval-seconds> <description> <command...>
+# Polls <command...> until it succeeds or the timeout elapses.
+wait_for() {
+    local timeout=$1 interval=$2 desc=$3
+    shift 3
+    local start=$SECONDS
+    log "waiting up to ${timeout}s for: ${desc}"
+    while ((SECONDS - start < timeout)); do
+        if "$@" >/dev/null 2>&1; then
+            log "ready after $((SECONDS - start))s: ${desc}"
+            return 0
+        fi
+        sleep "$interval"
+    done
+    die "timed out after ${timeout}s waiting for: ${desc}"
+}

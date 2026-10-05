@@ -15,19 +15,32 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM --platform=$BUILDPLATFORM golang:1.23 AS builder
-ARG BUILDPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
-
-WORKDIR /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-COPY go.mod /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.mod
-COPY go.sum /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.sum
-RUN go mod download
-
-COPY . /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-RUN make clean && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} make
-
-FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/cloudstack-ccm /app/cloudstack-ccm
-ENTRYPOINT [ "/app/cloudstack-ccm", "--cloud-provider", "external-cloudstack" ]
+name: CodeQL Analysis
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["actions", "go"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
