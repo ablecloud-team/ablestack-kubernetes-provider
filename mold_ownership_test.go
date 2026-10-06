@@ -171,3 +171,37 @@ func TestMoldDeletionRetryDoesNotAllocateAnIP(t *testing.T) {
 		t.Fatal("remaining allocation not recovered read-only")
 	}
 }
+
+func TestMoldLastServiceReleasesControllerOwnedSharedIPWithoutItsOldAnnotation(t *testing.T) {
+	released := false
+	owner := &loadBalancer{clusterUID: "cluster-1", serviceUID: "deleted-first-service", networkID: "network-1", ipAddrID: "ip-1", ipGeneration: "generation-1"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		command := strings.ToLower(r.FormValue("command"))
+		var result interface{}
+		switch command {
+		case "listpublicipaddresses":
+			result = map[string]interface{}{"count": 1, "publicipaddress": []interface{}{map[string]interface{}{"id": "ip-1", "ipaddress": "10.1.1.1", "allocated": "2026-10-06T19:00:00+0000", "allocationgeneration": "generation-1", "tags": owner.ownershipTags()}}}
+		case "listloadbalancerrules", "listfirewallrules", "listportforwardingrules":
+			result = map[string]interface{}{"count": 0}
+		case "disassociateipaddress":
+			released = true
+			if r.FormValue("expectedallocationgeneration") != "generation-1" {
+				t.Error("missing allocation generation")
+			}
+			result = map[string]interface{}{"success": true}
+		default:
+			t.Errorf("unexpected API %s", command)
+			result = map[string]interface{}{}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{command + "response": result})
+	}))
+	defer server.Close()
+	cs := &CSCloud{clusterUID: "cluster-1", client: cloudstack.NewClient(server.URL, "fixture", "fixture", true)}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "last", Namespace: "app", UID: types.UID("last-service")}, Spec: corev1.ServiceSpec{LoadBalancerIP: "10.1.1.1"}, Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{Ingress: []corev1.LoadBalancerIngress{{IP: "10.1.1.1"}}}}}
+	if err := cs.EnsureLoadBalancerDeleted(context.Background(), "", svc); err != nil {
+		t.Fatal(err)
+	}
+	if !released {
+		t.Fatal("last Service left a verified controller-owned allocation behind")
+	}
+}

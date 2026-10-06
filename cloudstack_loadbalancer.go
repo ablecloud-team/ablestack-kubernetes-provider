@@ -413,6 +413,13 @@ func (cs *CSCloud) EnsureLoadBalancerDeleted(ctx context.Context, clusterName st
 		}
 	}
 
+	if lb.clusterUID != "" {
+		if err := lb.releaseOwnedAllocation(); err != nil {
+			return err
+		}
+		return sweepErr
+	}
+
 	if lb.ipAddr != "" {
 		// If the IP was allocated by the controller (not specified in service spec), release it.
 		if lb.ipAddr != service.Spec.LoadBalancerIP {
