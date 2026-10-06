@@ -149,39 +149,32 @@ func (cs *CSCloud) CurrentNodeName(ctx context.Context, hostname string) (types.
 	return types.NodeName(hostname), nil
 }
 
-// InstanceExistsByProviderID returns if the instance still exists.
+// InstanceExistsByProviderID must not turn authentication or transport errors into deletion.
 func (cs *CSCloud) InstanceExistsByProviderID(ctx context.Context, providerID string) (bool, error) {
-	_, count, err := cs.client.VirtualMachine.GetVirtualMachineByID(
-		cs.getInstanceIDFromProviderID(providerID),
-		cloudstack.WithProject(cs.projectID),
-	)
-	if err != nil {
-		if count == 0 {
-			return false, nil
-		}
-		return false, fmt.Errorf("error retrieving instance: %v", err)
-	}
-
-	return true, nil
+	instance, err := cs.lifecycleInstance(ctx, providerID, "")
+	return instance != nil, err
 }
 
-// InstanceShutdownByProviderID returns true if the instance is in safe state to detach volumes
+// InstanceShutdownByProviderID reports only a stable stopped VM as safely powered off.
 func (cs *CSCloud) InstanceShutdownByProviderID(ctx context.Context, providerID string) (bool, error) {
-	return false, cloudprovider.NotImplemented
+	instance, err := cs.lifecycleInstance(ctx, providerID, "")
+	return lifecycleShutdown(instance, err)
 }
 
 func (cs *CSCloud) InstanceExists(ctx context.Context, node *corev1.Node) (bool, error) {
-	nodeName := types.NodeName(node.Name)
-	providerID, err := cs.InstanceID(ctx, nodeName)
-	if err != nil {
-		return false, err
+	if node == nil {
+		return false, errors.New("cannot check lifecycle of a nil node")
 	}
-
-	return cs.InstanceExistsByProviderID(ctx, providerID)
+	instance, err := cs.lifecycleInstance(ctx, node.Spec.ProviderID, node.Name)
+	return instance != nil, err
 }
 
 func (cs *CSCloud) InstanceShutdown(ctx context.Context, node *corev1.Node) (bool, error) {
-	return false, cloudprovider.NotImplemented
+	if node == nil {
+		return false, errors.New("cannot check lifecycle of a nil node")
+	}
+	instance, err := cs.lifecycleInstance(ctx, node.Spec.ProviderID, node.Name)
+	return lifecycleShutdown(instance, err)
 }
 
 func (cs *CSCloud) InstanceMetadata(ctx context.Context, node *corev1.Node) (*cloudprovider.InstanceMetadata, error) {
