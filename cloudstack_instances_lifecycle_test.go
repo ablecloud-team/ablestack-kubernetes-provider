@@ -180,7 +180,12 @@ func TestLifecycleRealSDKHTTPFailuresDoNotDeleteNode(t *testing.T) {
 		{"malformed response", 200, "not-json"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); w.Write([]byte(tc.body)) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Error(err)
+				}
+			}))
 			defer server.Close()
 			cs := &CSCloud{client: cloudstack.NewClient(server.URL, "test-key", "test-secret", false)}
 			exists, err := cs.InstanceExistsByProviderID(context.Background(), "vm-id")
@@ -194,7 +199,9 @@ func TestLifecycleRealSDKHTTPFailuresDoNotDeleteNode(t *testing.T) {
 		if !strings.EqualFold(r.URL.Query().Get("command"), "listVirtualMachines") {
 			t.Errorf("wrong API command")
 		}
-		w.Write([]byte("{\"listvirtualmachinesresponse\":{\"count\":0,\"virtualmachine\":[]}}"))
+		if _, err := w.Write([]byte("{\"listvirtualmachinesresponse\":{\"count\":0,\"virtualmachine\":[]}}")); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 	cs := &CSCloud{client: cloudstack.NewClient(server.URL, "test-key", "test-secret", false)}
