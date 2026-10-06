@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0.
+# https://www.apache.org/licenses/LICENSE-2.0
+name: License Check
+on:
+  push:
+    branches: ['codex/**', main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  license:
+    name: Full repository License Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify tracked repository license notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/apache-rat"
+          mkdir -p "$tools"
+          curl --fail --location --retry 2 --max-time 120 --output "$tools/rat.tgz" https://downloads.apache.org/creadur/apache-rat-0.18/apache-rat-0.18-bin.tar.gz
+          echo '315b16536526838237c42b5e6b613d29adc77e25a6e44a866b2b7f8b162e03d3629d49c9faea86ceb864a36b2c42838b8ce43d6f2db544e961f2259e242748f4  '"$tools/rat.tgz" | sha512sum --check
+          tar -xzf "$tools/rat.tgz" -C "$tools"
+          mkdir -p "$RUNNER_TEMP/license-source"
+          git archive HEAD | tar -xf - -C "$RUNNER_TEMP/license-source"
+          java -jar "$tools/apache-rat-0.18/apache-rat-0.18.jar" --input-exclude-file .rat-excludes -- "$RUNNER_TEMP/license-source" > "$RUNNER_TEMP/rat-report.txt"
+          cat "$RUNNER_TEMP/rat-report.txt"
+          python3 - "$RUNNER_TEMP/rat-report.txt" <<'PYCODE'
+          import pathlib, re, sys
+          report = pathlib.Path(sys.argv[1]).read_text()
+          count = re.search(r'^\s*[!]?[ ]*Unapproved:\s*(\d+)\s+A count of unapproved licenses\.', report, re.M)
+          if not count or count.group(1) != '0':
+              raise SystemExit('Repository license notices did not pass')
+          print('Full repository License Check passed')
+          PYCODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: license-report-${{ github.sha }}
+          path: ${{ runner.temp }}/rat-report.txt

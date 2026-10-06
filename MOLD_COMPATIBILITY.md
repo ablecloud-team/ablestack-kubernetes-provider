@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+-->
 # Mold Kubernetes 구성 요소 검증 후보
 
 기준: Apache Provider main 2a46b8e43382bbd1564db7a9bfa56f9caa872d13. 내부 HMAC-SHA256 및 저장소 네임스페이스를 유지하면서 원본 변경을 병합했습니다.

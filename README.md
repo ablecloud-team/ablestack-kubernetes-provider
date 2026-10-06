@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+-->
 # CloudStack Kubernetes Provider
 
 [![](https://img.shields.io/github/release/apache/cloudstack-kubernetes-provider.svg?logo=github&style=flat-square "Release")](https://github.com/ablecloud-team/ablestack-kubernetes-provider/releases)
