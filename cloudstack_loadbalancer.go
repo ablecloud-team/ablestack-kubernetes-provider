@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ablecloud-team/ablestack-mold-go/v2/cloudstack"
 	"github.com/blang/semver/v4"
@@ -53,6 +54,10 @@ const (
 	// If not specified, the default is to allow all sources ("0.0.0.0/0").
 	ServiceAnnotationLoadBalancerSourceCidrs = "service.beta.kubernetes.io/cloudstack-load-balancer-source-cidrs"
 
+	// TCP readiness is enabled by default. Controllers outside the guest network
+	// can explicitly disable it when they cannot reach a backend NodePort.
+	ServiceAnnotationLoadBalancerBackendReadiness = "service.beta.kubernetes.io/cloudstack-load-balancer-backend-readiness-check"
+
 	// ServiceAnnotationLoadBalancerIPAssociatedByController indicates that the controller
 	// associated the IP address. This annotation is set by the controller when it associates
 	// an unallocated IP, and is used to determine if the IP should be disassociated on deletion.
@@ -70,6 +75,7 @@ type loadBalancer struct {
 	name                     string
 	algorithm                string
 	hostIDs                  []string
+	beforeAssign             func(*cloudstack.LoadBalancerRule, []string) error
 	ipAddr                   string
 	ipAddrID                 string
 	networkID                string
@@ -137,6 +143,11 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 		return nil, fmt.Errorf("requested load balancer with no ports")
 	}
 
+	checkBackends, err := backendReadinessEnabled(service)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get the load balancer details and existing rules.
 	lb, err := cs.getLoadBalancer(service)
 	if err != nil {
@@ -158,9 +169,16 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 	}
 
 	// Verify that all the hosts belong to the same network, and retrieve their ID's.
-	lb.hostIDs, lb.networkID, err = cs.verifyHosts(nodes)
+	var hostIPs map[string]string
+	lb.hostIDs, lb.networkID, hostIPs, err = cs.verifyHostsWithAddresses(nodes)
 	if err != nil {
 		return nil, err
+	}
+
+	if checkBackends && cs.backendProbe != nil {
+		lb.beforeAssign = func(rule *cloudstack.LoadBalancerRule, ids []string) error {
+			return checkNewBackendPorts(ctx, rule, ids, hostIPs, cs.backendProbe)
+		}
 	}
 
 	if !lb.hasLoadBalancerIP() {
@@ -236,6 +254,11 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 func (cs *CSCloud) UpdateLoadBalancer(ctx context.Context, clusterName string, service *corev1.Service, nodes []*corev1.Node) error {
 	klog.V(4).Infof("UpdateLoadBalancer(%v, %v, %v, %v)", clusterName, service.Namespace, service.Name, nodes)
 
+	checkBackends, err := backendReadinessEnabled(service)
+	if err != nil {
+		return err
+	}
+
 	// Get the load balancer details and existing rules.
 	lb, err := cs.getLoadBalancer(service)
 	if err != nil {
@@ -243,9 +266,16 @@ func (cs *CSCloud) UpdateLoadBalancer(ctx context.Context, clusterName string, s
 	}
 
 	// Verify that all the hosts belong to the same network, and retrieve their ID's.
-	lb.hostIDs, _, err = cs.verifyHosts(nodes)
+	var hostIPs map[string]string
+	lb.hostIDs, _, hostIPs, err = cs.verifyHostsWithAddresses(nodes)
 	if err != nil {
 		return err
+	}
+
+	if checkBackends && cs.backendProbe != nil {
+		lb.beforeAssign = func(rule *cloudstack.LoadBalancerRule, ids []string) error {
+			return checkNewBackendPorts(ctx, rule, ids, hostIPs, cs.backendProbe)
+		}
 	}
 
 	for _, lbRule := range lb.rules {
@@ -267,16 +297,16 @@ func (cs *CSCloud) UpdateLoadBalancer(ctx context.Context, clusterName string, s
 
 		assign, remove := symmetricDifference(lb.hostIDs, instances)
 
-		if len(assign) > 0 {
-			klog.V(4).Infof("Assigning new hosts (%v) to load balancer rule: %v", assign, lbRule.Name)
-			if err := lb.assignHostsToRule(lbRule, assign); err != nil {
+		if len(remove) > 0 {
+			klog.V(4).Infof("Removing old hosts (%v) from load balancer rule: %v", remove, lbRule.Name)
+			if err := lb.removeHostsFromRule(lbRule, remove); err != nil {
 				return err
 			}
 		}
 
-		if len(remove) > 0 {
-			klog.V(4).Infof("Removing old hosts (%v) from load balancer rule: %v", assign, lbRule.Name)
-			if err := lb.removeHostsFromRule(lbRule, remove); err != nil {
+		if len(assign) > 0 {
+			klog.V(4).Infof("Assigning new hosts (%v) to load balancer rule: %v", assign, lbRule.Name)
+			if err := lb.assignHostsToRule(lbRule, assign); err != nil {
 				return err
 			}
 		}
@@ -517,6 +547,11 @@ func (cs *CSCloud) getNetworkIDFromIPAddress(publicIpId string) (string, error) 
 
 // verifyHosts verifies if all hosts belong to the same network, and returns the host ID's and network ID.
 func (cs *CSCloud) verifyHosts(nodes []*corev1.Node) ([]string, string, error) {
+	ids, networkID, _, err := cs.verifyHostsWithAddresses(nodes)
+	return ids, networkID, err
+}
+
+func (cs *CSCloud) verifyHostsWithAddresses(nodes []*corev1.Node) ([]string, string, map[string]string, error) {
 	hostNames := map[string]bool{}
 	for _, node := range nodes {
 		// node.Name can be an FQDN as well, and CloudStack VM names aren't
@@ -541,9 +576,10 @@ func (cs *CSCloud) verifyHosts(nodes []*corev1.Node) ([]string, string, error) {
 		return l.Count, l.VirtualMachines, nil
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("error retrieving list of hosts: %v", err)
+		return nil, "", nil, fmt.Errorf("error retrieving list of hosts: %v", err)
 	}
 
+	hostIPs := map[string]string{}
 	var hostIDs []string
 	var networkID string
 	seen := map[string]bool{} // used to check whether the changing set of VMs contains one we had already seen in another page.
@@ -554,9 +590,13 @@ func (cs *CSCloud) verifyHosts(nodes []*corev1.Node) ([]string, string, error) {
 			continue
 		}
 		seen[vm.Id] = true
+		if len(vm.Nic) == 0 {
+			return nil, "", nil, fmt.Errorf("host VM %s has no NIC", vm.Id)
+		}
+		hostIPs[vm.Id] = vm.Nic[0].Ipaddress
 
 		if networkID != "" && networkID != vm.Nic[0].Networkid {
-			return nil, "", fmt.Errorf("found hosts that belong to different networks")
+			return nil, "", nil, fmt.Errorf("found hosts that belong to different networks")
 		}
 
 		networkID = vm.Nic[0].Networkid
@@ -564,10 +604,10 @@ func (cs *CSCloud) verifyHosts(nodes []*corev1.Node) ([]string, string, error) {
 	}
 
 	if len(hostIDs) == 0 || len(networkID) == 0 {
-		return nil, "", fmt.Errorf("none of the hosts matched the list of VMs retrieved from CS API")
+		return nil, "", nil, fmt.Errorf("none of the hosts matched the list of VMs retrieved from CS API")
 	}
 
-	return hostIDs, networkID, nil
+	return hostIDs, networkID, hostIPs, nil
 }
 
 // hasLoadBalancerIP returns true if we have a load balancer address and ID.
@@ -1259,6 +1299,11 @@ func (lb *loadBalancer) publicIPHasRules(publicIPID string) (bool, error) {
 
 // assignHostsToRule assigns hosts to a load balancer rule.
 func (lb *loadBalancer) assignHostsToRule(lbRule *cloudstack.LoadBalancerRule, hostIDs []string) error {
+	if lb.beforeAssign != nil {
+		if err := lb.beforeAssign(lbRule, hostIDs); err != nil {
+			return err
+		}
+	}
 	p := lb.LoadBalancer.NewAssignToLoadBalancerRuleParams(lbRule.Id)
 	p.SetVirtualmachineids(hostIDs)
 
@@ -1684,4 +1729,51 @@ func getBoolFromServiceAnnotation(service *corev1.Service, annotationKey string,
 	}
 	klog.V(4).Infof("Could not find a Service Annotation; falling back to default setting: %v = %v", annotationKey, defaultSetting)
 	return defaultSetting
+}
+
+// backendReadinessEnabled validates the Service option before any cloud mutation.
+func backendReadinessEnabled(service *corev1.Service) (bool, error) {
+	value, set := service.Annotations[ServiceAnnotationLoadBalancerBackendReadiness]
+	if !set {
+		return true, nil
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s: expected a boolean", ServiceAnnotationLoadBalancerBackendReadiness)
+	}
+	return enabled, nil
+}
+
+func probeTCPBackend(ctx context.Context, address string) error {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+// Node Ready can precede kube-proxy/CNI's working service data path. Check only
+// new destinations, so an unavailable addition never reconfigures healthy ones.
+// The addresses come from the verified Mold VM NICs, not user annotations.
+func checkNewBackendPorts(ctx context.Context, rule *cloudstack.LoadBalancerRule, ids []string, hostIPs map[string]string, probe func(context.Context, string) error) error {
+	if len(ids) == 0 || strings.EqualFold(rule.Protocol, "udp") {
+		return nil
+	}
+	port, err := strconv.Atoi(rule.Privateport)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid backend port for load balancer rule %s", rule.Id)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for _, id := range ids {
+		ip := hostIPs[id]
+		if net.ParseIP(ip) == nil {
+			return fmt.Errorf("backend VM %s has no valid guest NIC address", id)
+		}
+		if err := probe(ctx, net.JoinHostPort(ip, strconv.Itoa(port))); err != nil {
+			return fmt.Errorf("backend VM %s NodePort %d is not ready: %w", id, port, err)
+		}
+	}
+	return nil
 }

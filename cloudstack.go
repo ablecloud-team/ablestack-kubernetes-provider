@@ -69,6 +69,7 @@ type CSCloud struct {
 	region        string
 	version       semver.Version
 	clientBuilder cloudprovider.ControllerClientBuilder
+	backendProbe  func(context.Context, string) error
 }
 
 func init() {
@@ -99,10 +100,11 @@ func readConfig(config io.Reader) (*CSConfig, error) {
 // newCSCloud creates a new instance of CSCloud.
 func newCSCloud(cfg *CSConfig) (*CSCloud, error) {
 	cs := &CSCloud{
-		projectID: cfg.Global.ProjectID,
-		zone:      cfg.Global.Zone,
-		region:    cfg.Global.Region,
-		version:   semver.Version{},
+		projectID:    cfg.Global.ProjectID,
+		zone:         cfg.Global.Zone,
+		region:       cfg.Global.Region,
+		version:      semver.Version{},
+		backendProbe: probeTCPBackend,
 	}
 
 	if cfg.Global.APIURL != "" && cfg.Global.APIKey != "" && cfg.Global.SecretKey != "" {
