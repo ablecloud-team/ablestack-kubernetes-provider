@@ -478,3 +478,9 @@ Copyright 2019 The Apache Software Foundation
 
 This product includes software developed at
 The Apache Software Foundation (http://www.apache.org/).
+
+### Mold 소유권 정리 profile
+
+`[Global] cluster-uuid`에 Mold의 실제 클러스터 UUID를 전달한 ownership-v1 profile은 LB, Firewall, VPC ACL과 새로 할당한 IP에 클러스터·Service UID, 네트워크 UUID, IP UUID와 할당 세대를 기록합니다. 기존 profile은 이 설정을 자동으로 받지 않습니다. Mold API가 `allocationgeneration` 및 조건부 `disassociateIpAddress(expectedallocationgeneration)`를 제공해야 하며, service account에 자기 계정 자원의 `createTags` 권한이 필요합니다. 수동·공유·source-NAT/static-NAT IP는 보존하고, 변경된 할당 세대나 불완전한 receipt의 삭제는 실패로 반환합니다.
+
+CCM 장애/API 장애 시 서버 정리는 같은 ownership-v1 계약의 Mold destroy worker와 함께 검증해야 합니다. 태그 추가 실패 시 새로 생성한 규칙만 되돌리며 되돌리기 실패는 자원 UUID와 함께 보고합니다. 이름만 보고 기존 수동 규칙을 소유 자원으로 전환하지 않습니다.

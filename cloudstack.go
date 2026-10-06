@@ -49,6 +49,7 @@ const ProviderName = "external-cloudstack"
 type CSConfig struct {
 	Global struct {
 		APIURL      string `gcfg:"api-url"`
+		ClusterUID  string `gcfg:"cluster-uuid"`
 		APIKey      string `gcfg:"api-key"`
 		SecretKey   string `gcfg:"secret-key"`
 		SSLNoVerify bool   `gcfg:"ssl-no-verify"`
@@ -64,6 +65,7 @@ type CSConfig struct {
 // CSCloud is an implementation of Interface for CloudStack.
 type CSCloud struct {
 	client        *cloudstack.CloudStackClient
+	clusterUID    string
 	projectID     string // If non-"", all resources will be created within this project
 	zone          string
 	region        string
@@ -101,6 +103,7 @@ func readConfig(config io.Reader) (*CSConfig, error) {
 func newCSCloud(cfg *CSConfig) (*CSCloud, error) {
 	cs := &CSCloud{
 		projectID:    cfg.Global.ProjectID,
+		clusterUID:   cfg.Global.ClusterUID,
 		zone:         cfg.Global.Zone,
 		region:       cfg.Global.Region,
 		version:      semver.Version{},

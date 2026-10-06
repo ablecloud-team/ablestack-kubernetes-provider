@@ -72,6 +72,9 @@ var cidrListUpdateVersion = semver.Version{Major: 4, Minor: 22, Patch: 0}
 type loadBalancer struct {
 	*cloudstack.CloudStackClient
 
+	clusterUID               string
+	serviceUID               string
+	ipGeneration             string
 	name                     string
 	algorithm                string
 	hostIDs                  []string
@@ -154,6 +157,9 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 		return nil, err
 	}
 
+	if err := lb.verifyAllocationReceipt(); err != nil {
+		return nil, err
+	}
 	if err := lb.deleteDuplicateRules(); err != nil {
 		return nil, err
 	}
@@ -344,6 +350,13 @@ func (cs *CSCloud) EnsureLoadBalancerDeleted(ctx context.Context, clusterName st
 		return err
 	}
 
+	if err := lb.restoreOwnedAllocationFromService(service); err != nil {
+		return err
+	}
+	if err := lb.verifyAllocationReceipt(); err != nil {
+		return err
+	}
+
 	// Reported only once this service's own resources are gone, so a retry sees the
 	// leftover duplicate as an ordinary rule and deletes it through the path above.
 	sweepErr := lb.deleteDuplicateRules()
@@ -376,12 +389,18 @@ func (cs *CSCloud) EnsureLoadBalancerDeleted(ctx context.Context, clusterName st
 				if network.Vpcid == "" {
 					_, err = lb.deleteFirewallRule(lbRule.Publicipid, int(port), protocol)
 					if err != nil {
+						if lb.clusterUID != "" {
+							return err
+						}
 						klog.Errorf("Error deleting firewall rule: %v", err)
 					}
 				} else {
 					klog.V(4).Infof("Deleting network ACLs for %v - %v", int(port), protocol)
 					_, err = lb.deleteNetworkACLRule(int(port), protocol, networkId)
 					if err != nil {
+						if lb.clusterUID != "" {
+							return err
+						}
 						klog.Errorf("Error deleting Network ACL rule: %v", err)
 					}
 				}
@@ -455,6 +474,8 @@ func (cs *CSCloud) GetLoadBalancerName(ctx context.Context, clusterName string, 
 func (cs *CSCloud) getLoadBalancer(service *corev1.Service) (*loadBalancer, error) {
 	lb := &loadBalancer{
 		CloudStackClient: cs.client,
+		clusterUID:       cs.clusterUID,
+		serviceUID:       string(service.UID),
 		name:             cs.GetLoadBalancerName(context.TODO(), "", service),
 		projectID:        cs.projectID,
 		rules:            make(map[string]*cloudstack.LoadBalancerRule),
@@ -494,6 +515,15 @@ func (cs *CSCloud) getLoadBalancer(service *corev1.Service) (*loadBalancer, erro
 	}
 
 	for _, lbRule := range lbRules {
+		if lb.clusterUID != "" {
+			tags := ownershipTagMap(lbRule.Tags)
+			if tags[ownerClusterTag] != lb.clusterUID || tags[ownerServiceTag] != lb.serviceUID {
+				continue
+			}
+			if tags[ownerNetworkTag] == "" || tags[ownerGenerationTag] == "" {
+				return nil, fmt.Errorf("load balancer ownership receipt is incomplete")
+			}
+		}
 		if existing, seen := lb.rules[lbRule.Name]; seen {
 			duplicate := lbRule
 			if lbRule.Publicip == preferredIP && existing.Publicip != preferredIP {
@@ -514,6 +544,10 @@ func (cs *CSCloud) getLoadBalancer(service *corev1.Service) (*loadBalancer, erro
 		if lb.ipAddr == "" || (lbRule.Publicip == preferredIP && lb.ipAddr != preferredIP) {
 			lb.ipAddr = lbRule.Publicip
 			lb.ipAddrID = lbRule.Publicipid
+			if lb.clusterUID != "" {
+				tags := ownershipTagMap(lbRule.Tags)
+				lb.networkID, lb.ipGeneration = tags[ownerNetworkTag], tags[ownerGenerationTag]
+			}
 		}
 	}
 
@@ -648,6 +682,12 @@ func (lb *loadBalancer) getPublicIPAddress(loadBalancerIP string) error {
 
 	lb.ipAddr = l.PublicIpAddresses[0].Ipaddress
 	lb.ipAddrID = l.PublicIpAddresses[0].Id
+	if lb.clusterUID != "" {
+		lb.ipGeneration = l.PublicIpAddresses[0].Allocationgeneration
+		if lb.ipGeneration == "" {
+			return fmt.Errorf("public IP allocation has no generation receipt")
+		}
+	}
 
 	// If the IP is not allocated, associate it.
 	if l.PublicIpAddresses[0].Allocated == "" {
@@ -694,12 +734,23 @@ func (lb *loadBalancer) associatePublicIPAddress() error {
 	lb.ipAddr = r.Ipaddress
 	lb.ipAddrID = r.Id
 	lb.ipAssociatedByController = true
-
+	if lb.clusterUID != "" {
+		lb.ipGeneration = r.Allocationgeneration
+		if lb.ipGeneration == "" {
+			return fmt.Errorf("Mold did not return an allocation generation; preserving allocated IP for recovery")
+		}
+		if err := lb.tagOwnedResource("PublicIpAddress", lb.ipAddrID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // releasePublicIPAddress releases an associated IP.
 func (lb *loadBalancer) releaseLoadBalancerIP() error {
+	if lb.clusterUID != "" {
+		return lb.releaseOwnedAllocation()
+	}
 	p := lb.Address.NewDisassociateIpAddressParams(lb.ipAddrID)
 
 	if _, err := lb.Address.DisassociateIpAddress(p); err != nil {
@@ -1203,6 +1254,13 @@ func (lb *loadBalancer) createLoadBalancerRule(lbRuleName string, port corev1.Se
 		return nil, fmt.Errorf("error creating load balancer rule %v: %v", lbRuleName, err)
 	}
 
+	if err := lb.tagOwnedResource("LoadBalancer", r.Id); err != nil {
+		_, cleanupErr := lb.LoadBalancer.DeleteLoadBalancerRule(lb.LoadBalancer.NewDeleteLoadBalancerRuleParams(r.Id))
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("ownership write and rollback failed for newly created load balancer %s", r.Id)
+		}
+		return nil, err
+	}
 	lbRule := &cloudstack.LoadBalancerRule{
 		Id:          r.Id,
 		Algorithm:   r.Algorithm,
@@ -1216,11 +1274,18 @@ func (lb *loadBalancer) createLoadBalancerRule(lbRuleName string, port corev1.Se
 		Protocol:    r.Protocol,
 	}
 
+	if lb.clusterUID != "" {
+		lbRule.Tags = lb.ownershipTags()
+	}
+
 	return lbRule, nil
 }
 
 // deleteLoadBalancerRule deletes a load balancer rule.
 func (lb *loadBalancer) deleteLoadBalancerRule(lbRule *cloudstack.LoadBalancerRule) error {
+	if !lb.ownsResource(lbRule.Tags) {
+		return fmt.Errorf("load balancer ownership does not match this service")
+	}
 	p := lb.LoadBalancer.NewDeleteLoadBalancerRuleParams(lbRule.Id)
 
 	if _, err := lb.LoadBalancer.DeleteLoadBalancerRule(p); err != nil {
@@ -1254,6 +1319,38 @@ func (lb *loadBalancer) deleteDuplicateRules() error {
 // deleteDuplicateRule tears down one duplicate: its firewall rule, the rule
 // itself, and its public IP once no other rule uses that IP.
 func (lb *loadBalancer) deleteDuplicateRule(lbRule *cloudstack.LoadBalancerRule) error {
+	if lb.clusterUID != "" {
+		scoped := *lb
+		tags := ownershipTagMap(lbRule.Tags)
+		scoped.networkID, scoped.ipGeneration, scoped.ipAddrID = tags[ownerNetworkTag], tags[ownerGenerationTag], lbRule.Publicipid
+		if err := scoped.verifyAllocationReceipt(); err != nil {
+			return err
+		}
+		port, err := strconv.Atoi(lbRule.Publicport)
+		protocol := ProtocolFromLoadBalancer(lbRule.Protocol)
+		if err != nil || protocol == LoadBalancerProtocolInvalid {
+			return fmt.Errorf("owned duplicate has invalid port or protocol")
+		}
+		network, _, err := scoped.Network.GetNetworkByID(scoped.networkID, cloudstack.WithProject(scoped.projectID))
+		if err != nil {
+			return err
+		}
+		if network.Vpcid == "" {
+			_, err = scoped.deleteFirewallRule(lbRule.Publicipid, port, protocol)
+		} else {
+			_, err = scoped.deleteNetworkACLRule(port, protocol, scoped.networkID)
+		}
+		if err != nil {
+			return err
+		}
+		if err := scoped.deleteLoadBalancerRule(lbRule); err != nil {
+			return err
+		}
+		if lbRule.Publicipid != lb.ipAddrID {
+			return scoped.releaseOwnedAllocation()
+		}
+		return nil
+	}
 	port, err := strconv.Atoi(lbRule.Publicport)
 	protocol := ProtocolFromLoadBalancer(lbRule.Protocol)
 	if err != nil || protocol == LoadBalancerProtocolInvalid {
@@ -1490,6 +1587,12 @@ func (lb *loadBalancer) updateFirewallRule(publicIpId string, publicPort int, pr
 	filtered := make(map[*cloudstack.FirewallRule]bool)
 	for _, rule := range firewallRules {
 		if rule.Protocol == protocol.IPProtocol() && rule.Startport == publicPort && rule.Endport == publicPort {
+			if !lb.ownsResource(rule.Tags) {
+				if compareStringSlice(splitCIDRList(rule.Cidrlist), allowedIPs) {
+					return false, nil
+				}
+				return false, fmt.Errorf("manual or foreign firewall rule owns requested port; preserving it")
+			}
 			filtered[rule] = true
 		}
 	}
@@ -1530,10 +1633,18 @@ func (lb *loadBalancer) updateFirewallRule(publicIpId string, publicPort int, pr
 		p.SetCidrlist(allowedIPs)
 		p.SetStartport(publicPort)
 		p.SetEndport(publicPort)
-		_, err = lb.Firewall.CreateFirewallRule(p)
+		created, createErr := lb.Firewall.CreateFirewallRule(p)
+		err = createErr
 		if err != nil {
 			// return immediately if we can't create the new rule
 			return false, fmt.Errorf("error creating new firewall rule for public IP %v, proto %v, port %v, allowed %v: %v", publicIpId, protocol, publicPort, allowedIPs, err)
+		}
+		if err := lb.tagOwnedResource("FirewallRule", created.Id); err != nil {
+			_, cleanupErr := lb.Firewall.DeleteFirewallRule(lb.Firewall.NewDeleteFirewallRuleParams(created.Id))
+			if cleanupErr != nil {
+				return false, fmt.Errorf("ownership write and rollback failed for newly created firewall %s", created.Id)
+			}
+			return false, err
 		}
 	}
 
@@ -1607,9 +1718,17 @@ func (lb *loadBalancer) updateNetworkACL(publicPort int, protocol LoadBalancerPr
 	acl.SetNetworkid(networkId)
 	acl.SetTraffictype("Ingress")
 
-	_, err = lb.NetworkACL.CreateNetworkACL(acl)
+	created, createErr := lb.NetworkACL.CreateNetworkACL(acl)
+	err = createErr
 	if err != nil {
 		return false, fmt.Errorf("error creating Network ACL for port: %v, due to: %s", publicPort, err)
+	}
+	if err := lb.tagOwnedResource("NetworkACL", created.Id); err != nil {
+		_, cleanupErr := lb.NetworkACL.DeleteNetworkACL(lb.NetworkACL.NewDeleteNetworkACLParams(created.Id))
+		if cleanupErr != nil {
+			return false, fmt.Errorf("ownership write and rollback failed for newly created ACL %s", created.Id)
+		}
+		return false, err
 	}
 	return true, err
 }
@@ -1626,7 +1745,7 @@ func (lb *loadBalancer) deleteFirewallRule(publicIpId string, publicPort int, pr
 	// filter by proto:port
 	filtered := make([]*cloudstack.FirewallRule, 0, 1)
 	for _, rule := range firewallRules {
-		if rule.Protocol == protocol.IPProtocol() && rule.Startport == publicPort && rule.Endport == publicPort {
+		if lb.ownsResource(rule.Tags) && rule.Protocol == protocol.IPProtocol() && rule.Startport == publicPort && rule.Endport == publicPort {
 			filtered = append(filtered, rule)
 		}
 	}

@@ -53,7 +53,7 @@ jobs:
           python3 - <<'PYPROV'
           import json,os,pathlib
           p=pathlib.Path('bin')
-          (p/'provenance.json').write_text(json.dumps({'source_repository':os.environ['REPOSITORY'],'source_sha':os.environ['SOURCE_SHA'],'build_run':os.environ['RUN_URL'],'original_baseline':'Apache Provider main 2a46b8e43382bbd1564db7a9bfa56f9caa872d13','architecture':'amd64','api_signature':'HMAC-SHA256','image':(p/'image-digest.txt').read_text().strip()},indent=2)+'\n')
+          (p/'provenance.json').write_text(json.dumps({'source_repository':os.environ['REPOSITORY'],'source_sha':os.environ['SOURCE_SHA'],'build_run':os.environ['RUN_URL'],'original_baseline':'Apache Provider main 2a46b8e43382bbd1564db7a9bfa56f9caa872d13','architecture':'amd64','features':['ownership-v1'],'api_signature':'HMAC-SHA256','image':(p/'image-digest.txt').read_text().strip()},indent=2)+'\n')
           PYPROV
           TAG="mold-test-${SOURCE_SHA:0:12}"
           gh release create "$TAG" bin/image-amd64.tar bin/image-digest.txt bin/provenance.json bin/go-modules.txt bin/SHA256SUMS --repo "$REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" --notes "Origin 검증 후보. 공식 릴리즈가 아닙니다. SHA256 API 인증 계약 테스트 통과 후 생성했습니다."
