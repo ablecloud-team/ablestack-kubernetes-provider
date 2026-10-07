@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/ablecloud-team/ablestack-mold-go/v2/cloudstack"
 	corev1 "k8s.io/api/core/v1"
@@ -53,7 +54,7 @@ func (cs *CSCloud) NodeAddresses(ctx context.Context, name types.NodeName) ([]co
 // NodeAddressesByProviderID returns the addresses of the specified instance.
 func (cs *CSCloud) NodeAddressesByProviderID(ctx context.Context, providerID string) ([]corev1.NodeAddress, error) {
 	instance, count, err := cs.client.VirtualMachine.GetVirtualMachineByID(
-		providerID,
+		cs.getInstanceIDFromProviderID(providerID),
 		cloudstack.WithProject(cs.projectID),
 	)
 	if err != nil {
@@ -125,7 +126,7 @@ func (cs *CSCloud) InstanceType(ctx context.Context, name types.NodeName) (strin
 // InstanceTypeByProviderID returns the type of the specified instance.
 func (cs *CSCloud) InstanceTypeByProviderID(ctx context.Context, providerID string) (string, error) {
 	instance, count, err := cs.client.VirtualMachine.GetVirtualMachineByID(
-		providerID,
+		cs.getInstanceIDFromProviderID(providerID),
 		cloudstack.WithProject(cs.projectID),
 	)
 	if err != nil {
@@ -148,42 +149,40 @@ func (cs *CSCloud) CurrentNodeName(ctx context.Context, hostname string) (types.
 	return types.NodeName(hostname), nil
 }
 
-// InstanceExistsByProviderID returns if the instance still exists.
+// InstanceExistsByProviderID must not turn authentication or transport errors into deletion.
 func (cs *CSCloud) InstanceExistsByProviderID(ctx context.Context, providerID string) (bool, error) {
-	_, count, err := cs.client.VirtualMachine.GetVirtualMachineByID(
-		providerID,
-		cloudstack.WithProject(cs.projectID),
-	)
-	if err != nil {
-		if count == 0 {
-			return false, nil
-		}
-		return false, fmt.Errorf("error retrieving instance: %v", err)
-	}
-
-	return true, nil
+	instance, err := cs.lifecycleInstance(ctx, providerID, "")
+	return instance != nil, err
 }
 
-// InstanceShutdownByProviderID returns true if the instance is in safe state to detach volumes
+// InstanceShutdownByProviderID reports only a stable stopped VM as safely powered off.
 func (cs *CSCloud) InstanceShutdownByProviderID(ctx context.Context, providerID string) (bool, error) {
-	return false, cloudprovider.NotImplemented
+	instance, err := cs.lifecycleInstance(ctx, providerID, "")
+	return lifecycleShutdown(instance, err)
 }
 
 func (cs *CSCloud) InstanceExists(ctx context.Context, node *corev1.Node) (bool, error) {
-	nodeName := types.NodeName(node.Name)
-	providerID, err := cs.InstanceID(ctx, nodeName)
-	if err != nil {
-		return false, err
+	if node == nil {
+		return false, errors.New("cannot check lifecycle of a nil node")
 	}
-
-	return cs.InstanceExistsByProviderID(ctx, providerID)
+	instance, err := cs.lifecycleInstance(ctx, node.Spec.ProviderID, node.Name)
+	return instance != nil, err
 }
 
 func (cs *CSCloud) InstanceShutdown(ctx context.Context, node *corev1.Node) (bool, error) {
-	return false, cloudprovider.NotImplemented
+	if node == nil {
+		return false, errors.New("cannot check lifecycle of a nil node")
+	}
+	instance, err := cs.lifecycleInstance(ctx, node.Spec.ProviderID, node.Name)
+	return lifecycleShutdown(instance, err)
 }
 
 func (cs *CSCloud) InstanceMetadata(ctx context.Context, node *corev1.Node) (*cloudprovider.InstanceMetadata, error) {
+
+	instanceID, err := cs.InstanceID(ctx, types.NodeName(node.Name))
+	if err != nil {
+		return nil, err
+	}
 
 	instanceType, err := cs.InstanceType(ctx, types.NodeName(node.Name))
 	if err != nil {
@@ -195,16 +194,28 @@ func (cs *CSCloud) InstanceMetadata(ctx context.Context, node *corev1.Node) (*cl
 		return nil, err
 	}
 
-	zone, err := cs.GetZone(ctx)
+	zone, err := cs.GetZoneByNodeName(ctx, types.NodeName(node.Name))
 	if err != nil {
 		return nil, err
 	}
 
 	return &cloudprovider.InstanceMetadata{
-		ProviderID:    cs.ProviderName(),
+		ProviderID:    cs.getProviderIDFromInstanceID(instanceID),
 		InstanceType:  instanceType,
 		NodeAddresses: addresses,
-		Zone:          cs.zone,
+		Zone:          zone.FailureDomain,
 		Region:        zone.Region,
 	}, nil
+}
+
+func (cs *CSCloud) getProviderIDFromInstanceID(instanceID string) string {
+	return fmt.Sprintf("%s://%s", cs.ProviderName(), instanceID)
+}
+
+func (cs *CSCloud) getInstanceIDFromProviderID(providerID string) string {
+	parts := strings.Split(providerID, "://")
+	if len(parts) == 1 {
+		return providerID
+	}
+	return parts[1]
 }

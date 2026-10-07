@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Generated dependency lock files and literal version metadata; source is scanned.
+.rat-excludes
+**/go.sum
+version

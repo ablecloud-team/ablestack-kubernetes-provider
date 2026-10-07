@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -15,19 +16,23 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM --platform=$BUILDPLATFORM golang:1.23 AS builder
-ARG BUILDPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
+# One-shot bring-up of the full simulated environment:
+# simulator + zone -> kind cluster -> CloudStack VMs -> CCM.
 
-WORKDIR /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-COPY go.mod /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.mod
-COPY go.sum /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.sum
-RUN go mod download
+set -euo pipefail
+here="$(dirname "${BASH_SOURCE[0]}")"
 
-COPY . /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-RUN make clean && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} make
+"${here}/10-simulator-up.sh"
+"${here}/20-kind-up.sh"
+"${here}/30-topology-isolated.sh"
+"${here}/40-ccm-deploy.sh"
 
-FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/cloudstack-ccm /app/cloudstack-ccm
-ENTRYPOINT [ "/app/cloudstack-ccm", "--cloud-provider", "external-cloudstack" ]
+echo
+echo "Environment is up. Try it:"
+echo "  export KUBECONFIG=${here}/_out/kubeconfig"
+echo "  kubectl create deployment web --image=nginx"
+echo "  kubectl expose deployment web --port=80 --type=LoadBalancer"
+echo "  kubectl get svc web -w   # EXTERNAL-IP appears from 192.168.2.0/24"
+echo
+echo "Run the e2e suite:  make test-e2e"
+echo "Tear down:          ${here}/99-down.sh"

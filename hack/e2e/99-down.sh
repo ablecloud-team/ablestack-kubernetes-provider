@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -15,19 +16,23 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM --platform=$BUILDPLATFORM golang:1.23 AS builder
-ARG BUILDPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
+# Tears down everything the harness created.
 
-WORKDIR /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-COPY go.mod /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.mod
-COPY go.sum /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/go.sum
-RUN go mod download
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+source "${E2E_ROOT}/lib/log.sh"
 
-COPY . /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider
-RUN make clean && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} make
+log "deleting kind cluster ${KIND_CLUSTER}"
+kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null
 
-FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /go/src/github.com/ablecloud-team/ablestack-kubernetes-provider/cloudstack-ccm /app/cloudstack-ccm
-ENTRYPOINT [ "/app/cloudstack-ccm", "--cloud-provider", "external-cloudstack" ]
+log "removing simulator container ${SIM_NAME}"
+docker rm -f "$SIM_NAME" 2>/dev/null
+
+log "removing docker network ${E2E_NET}"
+docker network rm "$E2E_NET" 2>/dev/null
+
+rm -f "${E2E_OUT}/keys.env" "${E2E_OUT}/cloud-config" "${E2E_OUT}/cloud-config-host" \
+    "${E2E_OUT}/kubeconfig" "${E2E_OUT}/node-ips" "${E2E_OUT}/ids.env" "${E2E_OUT}/cmk.ini"
+
+log "done"
+exit 0

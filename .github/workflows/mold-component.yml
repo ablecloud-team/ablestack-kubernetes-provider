@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0.
+# https://www.apache.org/licenses/LICENSE-2.0
+name: Mold component candidate
+on:
+  push:
+    branches: [codex/kubernetes-iso-1228]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mold-component-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.8'
+          cache-dependency-path: ./go.sum
+      - name: Contract and provider tests
+        run: go test -race ./...
+      - name: Build immutable amd64 binary
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/cloudstack-ccm ./cmd/cloudstack-ccm
+          go version -m bin/cloudstack-ccm > bin/go-modules.txt
+      - name: Publish Origin candidate
+        if: github.event_name != 'pull_request' && github.repository_owner == 'dhslove'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TAG="mold-test-${SOURCE_SHA:0:12}"
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then echo "Immutable candidate Release already exists" >&2; exit 1; fi
+          IMAGE="ghcr.io/${REPOSITORY}:sha-${SOURCE_SHA}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u dhslove --password-stdin
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then echo "Immutable candidate image already exists" >&2; exit 1; fi
+          docker build -f Dockerfile.mold --label org.opencontainers.image.revision="$SOURCE_SHA" --label org.opencontainers.image.source="https://github.com/$REPOSITORY" --label io.ablestack.api-signature=HMAC-SHA256 -t "$IMAGE" .
+          docker push "$IMAGE"
+          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE" > bin/image-digest.txt
+          docker save "$IMAGE" -o bin/image-amd64.tar
+          sha256sum bin/image-amd64.tar > bin/SHA256SUMS
+          python3 - <<'PYPROV'
+          import json,os,pathlib
+          p=pathlib.Path('bin')
+          (p/'provenance.json').write_text(json.dumps({'source_repository':os.environ['REPOSITORY'],'source_sha':os.environ['SOURCE_SHA'],'build_run':os.environ['RUN_URL'],'original_baseline':'Apache Provider main 2a46b8e43382bbd1564db7a9bfa56f9caa872d13','architecture':'amd64','features':['ownership-v1'],'api_signature':'HMAC-SHA256','image':(p/'image-digest.txt').read_text().strip()},indent=2)+'\n')
+          PYPROV
+          TAG="mold-test-${SOURCE_SHA:0:12}"
+          gh release create "$TAG" bin/image-amd64.tar bin/image-digest.txt bin/provenance.json bin/go-modules.txt bin/SHA256SUMS --repo "$REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" --notes "Origin 검증 후보. 공식 릴리즈가 아닙니다. SHA256 API 인증 계약 테스트 통과 후 생성했습니다."
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mold-amd64-component
+          path: ./bin/
