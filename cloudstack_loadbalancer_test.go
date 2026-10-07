@@ -4680,6 +4680,14 @@ func (e *ensureLBTestEnv) expectHostsAndNetwork() {
 	}, 1, nil)
 }
 
+// expectExistingBackends verifies that unchanged rules inspect actual members.
+func (e *ensureLBTestEnv) expectExistingBackends(id string) {
+	e.lb.EXPECT().NewListLoadBalancerRuleInstancesParams(id).Return(&cloudstack.ListLoadBalancerRuleInstancesParams{})
+	e.lb.EXPECT().ListLoadBalancerRuleInstances(gomock.Any()).Return(&cloudstack.ListLoadBalancerRuleInstancesResponse{
+		Count: 1, LoadBalancerRuleInstances: []*cloudstack.VirtualMachine{{Id: "vm-1"}},
+	}, nil)
+}
+
 func TestEnsureLoadBalancer(t *testing.T) {
 	tcpPort80 := corev1.ServicePort{Port: 80, NodePort: 30000, Protocol: corev1.ProtocolTCP}
 
@@ -4716,6 +4724,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 			ServiceAnnotationLoadBalancerProxyProtocol: "true",
 		}, []corev1.ServicePort{tcpPort80})
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-1")
 
 		updateParams := &cloudstack.UpdateLoadBalancerRuleParams{}
 
@@ -4760,6 +4769,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 
 		env := newEnsureLBTestEnv(ctrl, nil, []corev1.ServicePort{tcpPort80})
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-1")
 
 		existingProxyRule := existingTCPRule()
 		existingProxyRule.Name = "atestuid-tcp-proxy-80"
@@ -4807,6 +4817,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 
 		env := newEnsureLBTestEnv(ctrl, nil, []corev1.ServicePort{tcpPort80})
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-legacy")
 
 		legacyRule := existingTCPRule()
 		legacyRule.Id = "rule-legacy"
@@ -4854,6 +4865,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 		env := newEnsureLBTestEnv(ctrl, nil, []corev1.ServicePort{tcpPort80})
 		env.cs.version = semver.MustParse("4.21.0")
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-legacy")
 
 		legacyRule := existingTCPRule()
 		legacyRule.Id = "rule-legacy"
@@ -5039,6 +5051,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 			ServiceAnnotationLoadBalancerProxyProtocol: "true",
 		}, []corev1.ServicePort{tcpPort80})
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-2")
 
 		duplicateProxyRule := existingTCPRule()
 		duplicateProxyRule.Id = "rule-2"
@@ -5192,6 +5205,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 
 		env := newEnsureLBTestEnv(ctrl, nil, []corev1.ServicePort{tcpPort80})
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-1")
 
 		junkRule := existingTCPRule()
 		junkRule.Id = "rule-junk"
@@ -5280,6 +5294,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 
 		env := newEnsureLBTestEnv(ctrl, nil, []corev1.ServicePort{tcpPort80})
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-1")
 
 		obsolete := existingTCPRule()
 		obsolete.Id = "rule-obsolete"
@@ -5328,6 +5343,7 @@ func TestEnsureLoadBalancer(t *testing.T) {
 		env := newEnsureLBTestEnv(ctrl, nil, []corev1.ServicePort{tcpPort80})
 		env.service.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "10.0.0.1"}}
 		env.expectHostsAndNetwork()
+		env.expectExistingBackends("rule-1")
 
 		oldIPRule := existingTCPRule()
 		oldIPRule.Id = "rule-9"

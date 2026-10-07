@@ -1111,10 +1111,13 @@ func (lb *loadBalancer) ensureLoadBalancerRule(d desiredLBRule, service *corev1.
 	switch d.change {
 	case ruleUpToDate:
 		klog.V(4).Infof("Load balancer rule %v is up-to-date", d.name)
-		return d.existing, nil
+		return d.existing, lb.reconcileExistingRuleHosts(d.existing)
 	case ruleNeedsUpdate:
 		klog.V(4).Infof("Updating load balancer rule: %v", d.name)
-		return d.existing, lb.updateLoadBalancerRule(d.existing, d.name, d.protocol, service, version)
+		if err := lb.updateLoadBalancerRule(d.existing, d.name, d.protocol, service, version); err != nil {
+			return nil, err
+		}
+		return d.existing, lb.reconcileExistingRuleHosts(d.existing)
 	case ruleNeedsRecreate:
 		klog.V(4).Infof("Deleting load balancer rule %v so it can be created again", d.existing.Name)
 		if err := lb.deleteLoadBalancerRule(d.existing); err != nil {
@@ -1399,6 +1402,37 @@ func (lb *loadBalancer) publicIPHasRules(publicIPID string) (bool, error) {
 		return false, fmt.Errorf("error listing load balancer rules on IP %v: %v", publicIPID, err)
 	}
 	return rules.Count > 0, nil
+}
+
+// reconcileExistingRuleHosts repairs a rule whose first assignment failed. A
+// matching rule definition does not establish that its backend VMs are connected.
+// Add ready destinations before removing old ones so a failed addition preserves
+// the existing data path. Already converged destinations cause no cloud writes.
+func (lb *loadBalancer) reconcileExistingRuleHosts(rule *cloudstack.LoadBalancerRule) error {
+	if !lb.ownsResource(rule.Tags) {
+		return fmt.Errorf("load balancer ownership does not match this service")
+	}
+	p := lb.LoadBalancer.NewListLoadBalancerRuleInstancesParams(rule.Id)
+	instances, err := listAll(p, func() (int, []*cloudstack.VirtualMachine, error) {
+		l, err := lb.LoadBalancer.ListLoadBalancerRuleInstances(p)
+		if err != nil {
+			return 0, nil, err
+		}
+		return l.Count, l.LoadBalancerRuleInstances, nil
+	})
+	if err != nil {
+		return fmt.Errorf("error retrieving associated instances: %w", err)
+	}
+	assign, remove := symmetricDifference(lb.hostIDs, instances)
+	if len(assign) > 0 {
+		if err := lb.assignHostsToRule(rule, assign); err != nil {
+			return err
+		}
+	}
+	if len(remove) > 0 {
+		return lb.removeHostsFromRule(rule, remove)
+	}
+	return nil
 }
 
 // assignHostsToRule assigns hosts to a load balancer rule.
