@@ -6,7 +6,7 @@ module github.com/ablecloud-team/ablestack-kubernetes-provider
 go 1.23.0
 
 require (
-	github.com/ablecloud-team/ablestack-mold-go/v2 v2.19.2-mold-test.3
+	github.com/ablecloud-team/ablestack-mold-go/v2 v2.19.2-mold.1
 	github.com/blang/semver/v4 v4.0.0
 	github.com/spf13/pflag v1.0.5
 	go.uber.org/mock v0.5.0
@@ -127,5 +127,3 @@ replace k8s.io/component-helpers => k8s.io/component-helpers v0.24.17
 replace k8s.io/controller-manager => k8s.io/controller-manager v0.24.17
 
 replace k8s.io/mount-utils => k8s.io/mount-utils v0.24.17
-
-replace github.com/ablecloud-team/ablestack-mold-go/v2 => github.com/dhslove/ablestack-mold-go/v2 v2.19.2-mold-test.3
